@@ -7,6 +7,7 @@ import {
   outerHeight,
   outerWidth,
 } from './../../../helpers/dom/element';
+import {objectEach} from './../../../helpers/object';
 import {EventManager} from './../../../eventManager';
 import {WalkontableViewportColumnsCalculator} from './calculator/viewportColumns';
 import {WalkontableViewportRowsCalculator} from './calculator/viewportRows';
@@ -255,6 +256,8 @@ class WalkontableViewport {
       }
     }
 
+    this.rowHeaderWidth = this.instance.getSetting('onModifyRowHeaderWidth', this.rowHeaderWidth) || this.rowHeaderWidth;
+
     return this.rowHeaderWidth;
   }
 
@@ -477,6 +480,15 @@ class WalkontableViewport {
     }
 
     return false;
+  }
+
+  /**
+   * Resets values in keys of the hasOversizedColumnHeadersMarked object after updateSettings.
+   */
+  resetHasOversizedColumnHeadersMarked() {
+    objectEach(this.hasOversizedColumnHeadersMarked, function(value, key, object) {
+      object[key] = void 0;
+    });
   }
 }
 

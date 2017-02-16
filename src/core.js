@@ -17,6 +17,7 @@ import {rangeEach} from './helpers/number';
 import {TableView} from './tableView';
 import {DataSource} from './dataSource';
 import {translateRowsToColumns, cellMethodLookupFactory, spreadsheetColumnLabel} from './helpers/data';
+import {getTranslator} from './utils/recordTranslator';
 import {WalkontableCellCoords} from './3rdparty/walkontable/src/cell/coords';
 import {WalkontableCellRange} from './3rdparty/walkontable/src/cell/range';
 import {WalkontableViewportColumnsCalculator} from './3rdparty/walkontable/src/calculator/viewportColumns';
@@ -63,6 +64,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       GridSettings = function() {
       },
       eventManager = eventManagerObject(instance);
+
+  const recordTranslator = getTranslator(instance);
 
   extend(GridSettings.prototype, DefaultSettings.prototype); // create grid settings as a copy of default settings
   extend(GridSettings.prototype, userSettings); // overwrite defaults with user settings
@@ -135,10 +138,15 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       switch (action) {
         case 'insert_row':
 
-          if (instance.getSettings().maxRows === instance.countSourceRows()) {
+          const numberOfSourceRows = instance.countSourceRows();
+
+          if (instance.getSettings().maxRows === numberOfSourceRows) {
             return;
           }
-          delta = datamap.createRow(index, amount);
+
+          index = (isDefined(index)) ? index : numberOfSourceRows;
+
+          delta = datamap.createRow(index, amount, source);
           spliceWith(priv.cellSettings, index, amount, 'array');
 
           if (delta) {
@@ -152,9 +160,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
           break;
 
         case 'insert_col':
-          // column order may have changes, so we need to translate the selection column index -> source array index
-          // index = instance.runHooksAndReturn('modifyCol', index);
-          delta = datamap.createCol(index, amount);
+          delta = datamap.createCol(index, amount, source);
 
           for (let row = 0, len = instance.countSourceRows(); row < len; row++) {
             if (priv.cellSettings[row]) {
@@ -179,7 +185,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
           break;
 
         case 'remove_row':
-          datamap.removeRow(index, amount);
+          datamap.removeRow(index, amount, source);
           priv.cellSettings.splice(index, amount);
 
           var totalRows = instance.countRows();
@@ -198,9 +204,9 @@ Handsontable.Core = function Core(rootElement, userSettings) {
           break;
 
         case 'remove_col':
-          let logicalColumnIndex = translateColIndex(index);
+          let logicalColumnIndex = recordTranslator.toPhysicalColumn(index);
 
-          datamap.removeCol(index, amount);
+          datamap.removeCol(index, amount, source);
 
           for (let row = 0, len = instance.countSourceRows(); row < len; row++) {
             if (priv.cellSettings[row]) {  // if row hasn't been rendered it wouldn't have cellSettings
@@ -243,7 +249,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
 
         if (rows < priv.settings.minRows) {
           for (let r = 0, minRows = priv.settings.minRows; r < minRows - rows; r++) {
-            datamap.createRow(instance.countRows(), 1, true);
+            datamap.createRow(instance.countRows(), 1, 'auto');
           }
         }
       }
@@ -252,8 +258,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
 
         // should I add empty rows to meet minSpareRows?
         if (emptyRows < priv.settings.minSpareRows) {
-          for (; emptyRows < priv.settings.minSpareRows && instance.countRows() < priv.settings.maxRows; emptyRows++) {
-            datamap.createRow(instance.countRows(), 1, true);
+          for (; emptyRows < priv.settings.minSpareRows && instance.countSourceRows() < priv.settings.maxRows; emptyRows++) {
+            datamap.createRow(instance.countRows(), 1, 'auto');
           }
         }
       }
@@ -268,14 +274,14 @@ Handsontable.Core = function Core(rootElement, userSettings) {
         // should I add empty cols to meet minCols?
         if (priv.settings.minCols && !priv.settings.columns && instance.countCols() < priv.settings.minCols) {
           for (; instance.countCols() < priv.settings.minCols; emptyCols++) {
-            datamap.createCol(instance.countCols(), 1, true);
+            datamap.createCol(instance.countCols(), 1, 'auto');
           }
         }
         // should I add empty cols to meet minSpareCols?
         if (priv.settings.minSpareCols && !priv.settings.columns && instance.dataType === 'array' &&
             emptyCols < priv.settings.minSpareCols) {
           for (; emptyCols < priv.settings.minSpareCols && instance.countCols() < priv.settings.maxCols; emptyCols++) {
-            datamap.createCol(instance.countCols(), 1, true);
+            datamap.createCol(instance.countCols(), 1, 'auto');
           }
         }
       }
@@ -366,6 +372,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
             col: end === null ? null : end.col
           };
 
+      /* jshint ignore:start */
       // insert data with specified pasteMode method
       switch (method) {
         case 'shift_down' :
@@ -403,10 +410,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
           }
           break;
 
-        /* jshint ignore:start */
         case 'overwrite':
         default:
-          /* jshint ignore:end */
           // overwrite and other not specified options
           current.row = start.row;
           current.col = start.col;
@@ -455,7 +460,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
             current.col = start.col;
             cellMeta = instance.getCellMeta(current.row, current.col);
 
-            if ((source === 'paste' || source === 'autofill') && cellMeta.skipRowOnPaste) {
+            if ((source === 'CopyPaste.paste' || source === 'Autofill.autofill') && cellMeta.skipRowOnPaste) {
               skippedRow++;
               current.row++;
               rlen++;
@@ -471,7 +476,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
               }
               cellMeta = instance.getCellMeta(current.row, current.col);
 
-              if ((source === 'paste' || source === 'autofill') && cellMeta.skipColumnOnPaste) {
+              if ((source === 'CopyPaste.paste' || source === 'Autofill.fill') && cellMeta.skipColumnOnPaste) {
                 skippedColumn++;
                 current.col++;
                 clen++;
@@ -489,7 +494,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
                 col: logicalColumn
               };
 
-              if (source === 'autofill') {
+              if (source === 'Autofill.fill') {
                 let result = instance.runHooks('beforeAutofillInsidePopulate', index, direction, input, deltas, {}, selected);
 
                 if (result) {
@@ -526,6 +531,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
           instance.setDataAtCell(setData, null, null, source || 'populateFromArray');
           break;
       }
+      /* jshint ignore:end */
     },
   };
 
@@ -976,15 +982,15 @@ Handsontable.Core = function Core(rootElement, userSettings) {
             } else {
               numbro.culture(cellProperties.language);
             }
+
             const {delimiters} = numbro.cultureData(numbro.culture());
 
-            // add leading zero for numbers without it (for numbro validation) - https://github.com/foretagsplatsen/numbro/pull/182
-            if (new RegExp('^\\' + delimiters.decimal + '[0-9]+$').test(changes[i][3] + '')) {
-              changes[i][3] = '0' + changes[i][3];
-            }
             // try to parse to float - https://github.com/foretagsplatsen/numbro/pull/183
-            if (numbro.validate(changes[i][3]) || !isNaN(parseFloat(changes[i][3]))) {
-              changes[i][3] = numbro().unformat(changes[i][3]);
+            if (numbro.validate(changes[i][3]) && !isNaN(changes[i][3])) {
+              changes[i][3] = parseFloat(changes[i][3]);
+
+            } else {
+              changes[i][3] = numbro().unformat(changes[i][3]) || changes[i][3];
             }
           }
         }
@@ -1000,6 +1006,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
               if (result === false && cellProperties.allowInvalid === false) {
                 changes.splice(i, 1);         // cancel the change
                 cellProperties.valid = true;  // we cancelled the change, so cell value is still valid
+                const cell = instance.getCell(cellProperties.row, cellProperties.col);
+                removeClass(cell, instance.getSettings().invalidCellClassName);
                 --i;
               }
               waitingForValidator.removeValidatorFormQueue();
@@ -1036,13 +1044,15 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @fires Hooks#afterChange
    */
   function applyChanges(changes, source) {
-    var i = changes.length - 1;
+    let i = changes.length - 1;
 
     if (i < 0) {
       return;
     }
 
     for (; 0 <= i; i--) {
+      let skipThisChange = false;
+
       if (changes[i] === null) {
         changes.splice(i, 1);
         continue;
@@ -1054,13 +1064,22 @@ Handsontable.Core = function Core(rootElement, userSettings) {
 
       if (priv.settings.allowInsertRow) {
         while (changes[i][0] > instance.countRows() - 1) {
-          datamap.createRow();
+          let numberOfCreatedRows = datamap.createRow(void 0, void 0, source);
+
+          if (numberOfCreatedRows === 0) {
+            skipThisChange = true;
+            break;
+          }
         }
+      }
+
+      if (skipThisChange) {
+        continue;
       }
 
       if (instance.dataType === 'array' && (!priv.settings.columns || priv.settings.columns.length === 0) && priv.settings.allowInsertColumn) {
         while (datamap.propToCol(changes[i][1]) > instance.countCols() - 1) {
-          datamap.createCol();
+          datamap.createCol(void 0, void 0, source);
         }
       }
 
@@ -1073,6 +1092,12 @@ Handsontable.Core = function Core(rootElement, userSettings) {
     selection.refreshBorders(null, true);
     instance.view.wt.wtOverlays.adjustElementsSize();
     Handsontable.hooks.run(instance, 'afterChange', changes, source || 'edit');
+
+    let activeEditor = instance.getActiveEditor();
+
+    if (activeEditor && isDefined(activeEditor.refreshValue)) {
+      activeEditor.refreshValue();
+    }
   }
 
   this.validateCell = function(value, cellProperties, callback, source) {
@@ -1143,7 +1168,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @param {Number|Array} row Row index or array of changes in format `[[row, col, value], ...]`.
    * @param {Number} col Column index.
    * @param {String} value New value.
-   * @param {String} [source] String that identifies how this change will be described in the changes array (useful in onChange callback).
+   * @param {String} [source] String that identifies how this change will be described in the changes array (useful in onAfterChange or onBeforeChange callback).
    */
   this.setDataAtCell = function(row, col, value, source) {
     var
@@ -1164,7 +1189,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       changes.push([
         input[i][0],
         prop,
-        datamap.get(input[i][0], prop),
+        dataSource.getAtCell(recordTranslator.toPhysicalRow(input[i][0]), input[i][1]),
         input[i][2],
       ]);
     }
@@ -1172,6 +1197,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
     if (!source && typeof row === 'object') {
       source = col;
     }
+
+    instance.runHooks('afterSetDataAtCell', changes, source);
 
     validateChanges(changes, source, function() {
       applyChanges(changes, source);
@@ -1201,7 +1228,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       changes.push([
         input[i][0],
         input[i][1],
-        datamap.get(input[i][0], input[i][1]),
+        dataSource.getAtCell(recordTranslator.toPhysicalRow(input[i][0]), input[i][1]),
         input[i][2],
       ]);
     }
@@ -1209,6 +1236,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
     if (!source && typeof row === 'object') {
       source = prop;
     }
+
+    instance.runHooks('afterSetDataAtRowProp', changes, source);
 
     validateChanges(changes, source, function() {
       applyChanges(changes, source);
@@ -1387,29 +1416,7 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @fires Hooks#afterChange
    */
   this.loadData = function(data) {
-    if (typeof data === 'object' && data !== null) {
-      if (!(data.push && data.splice)) { // check if data is array. Must use duck-type check so Backbone Collections also pass it
-        // when data is not an array, attempt to make a single-row array of it
-        data = [data];
-      }
-    } else if (data === null) {
-      data = [];
-      var row;
-      for (var r = 0, rlen = priv.settings.startRows; r < rlen; r++) {
-        row = [];
-        for (var c = 0, clen = priv.settings.startCols; c < clen; c++) {
-          row.push(null);
-        }
-        data.push(row);
-      }
-    } else {
-      throw new Error('loadData only accepts array of objects or array of arrays (' + typeof data + ' given)');
-    }
-
-    priv.isPopulated = false;
-    GridSettings.prototype.data = data;
-
-    if (Array.isArray(priv.settings.dataSchema) || Array.isArray(data[0])) {
+    if (Array.isArray(priv.settings.dataSchema)) {
       instance.dataType = 'array';
     } else if (isFunction(priv.settings.dataSchema)) {
       instance.dataType = 'function';
@@ -1421,6 +1428,52 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       datamap.destroy();
     }
     datamap = new DataMap(instance, priv, GridSettings);
+
+    if (typeof data === 'object' && data !== null) {
+      if (!(data.push && data.splice)) { // check if data is array. Must use duck-type check so Backbone Collections also pass it
+        // when data is not an array, attempt to make a single-row array of it
+        data = [data];
+      }
+
+    } else if (data === null) {
+      data = [];
+      var row;
+      var r = 0;
+      var rlen = 0;
+      var dataSchema = datamap.getSchema();
+
+      for (r = 0, rlen = priv.settings.startRows; r < rlen; r++) {
+        if ((instance.dataType === 'object' || instance.dataType === 'function') && priv.settings.dataSchema) {
+          row = deepClone(dataSchema);
+          data.push(row);
+
+        } else if (instance.dataType === 'array') {
+          row = deepClone(dataSchema[0]);
+          data.push(row);
+
+        } else {
+          row = [];
+
+          for (var c = 0, clen = priv.settings.startCols; c < clen; c++) {
+            row.push(null);
+          }
+
+          data.push(row);
+        }
+      }
+
+    } else {
+      throw new Error('loadData only accepts array of objects or array of arrays (' + typeof data + ' given)');
+    }
+
+    priv.isPopulated = false;
+    GridSettings.prototype.data = data;
+
+    if (Array.isArray(data[0])) {
+      instance.dataType = 'array';
+    }
+
+    datamap.dataSource = data;
     dataSource.data = data;
     dataSource.dataType = instance.dataType;
     dataSource.colToProp = datamap.colToProp.bind(datamap);
@@ -1688,6 +1741,11 @@ Handsontable.Core = function Core(rootElement, userSettings) {
 
     if (!init) {
       datamap.clearLengthCache(); // force clear cache length on updateSettings() #3416
+
+      if (instance.view) {
+        instance.view.wt.wtViewport.resetHasOversizedColumnHeadersMarked();
+      }
+
       Handsontable.hooks.run(instance, 'afterUpdateSettings');
     }
 
@@ -1862,12 +1920,60 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    *
    * @memberof Core#
    * @function propToCol
-   * @param {String} prop Property name.
+   * @param {String|Number} prop Property name or column index.
    * @returns {Number} Column index.
    */
   this.propToCol = function(prop) {
     return datamap.propToCol(prop);
   };
+
+  /**
+   * Translate physical row index into visual.
+   *
+   * @since 0.29.0
+   * @memberof Core#
+   * @function toVisualRow
+   * @param {Number} row Physical row index.
+   * @returns {Number} Returns visual row index.
+   */
+  this.toVisualRow = (row) => recordTranslator.toVisualRow(row);
+
+  /**
+   * Translate physical column index into visual.
+   *
+   * @since 0.29.0
+   * @memberof Core#
+   * @function toVisualColumn
+   * @param {Number} column Physical column index.
+   * @returns {Number} Returns visual column index.
+   */
+  this.toVisualColumn = (column) => recordTranslator.toVisualColumn(column);
+
+  /**
+   * Translate visual row index into physical.
+   * If displayed rows order is different than the order of rows stored in memory (i.e. sorting is applied)
+   * to retrieve valid physical row index you can use this method.
+   *
+   * @since 0.29.0
+   * @memberof Core#
+   * @function toPhysicalRow
+   * @param {Number} row Visual row index.
+   * @returns {Number} Returns physical row index.
+   */
+  this.toPhysicalRow = (row) => recordTranslator.toPhysicalRow(row);
+
+  /**
+   * Translate visual column index into physical.
+   * If displayed columns order is different than the order of columns stored in memory (i.e. manual column move is applied)
+   * to retrieve valid physical column index you can use this method.
+   *
+   * @since 0.29.0
+   * @memberof Core#
+   * @function toPhysicalColumn
+   * @param {Number} column Visual column index.
+   * @returns {Number} Returns physical column index.
+   */
+  this.toPhysicalColumn = (column) => recordTranslator.toPhysicalColumn(column);
 
   /**
    * @description
@@ -1956,6 +2062,31 @@ Handsontable.Core = function Core(rootElement, userSettings) {
       data = dataSource.getData();
     } else {
       data = dataSource.getByRange(new WalkontableCellCoords(r, c), new WalkontableCellCoords(r2, c2));
+    }
+
+    return data;
+  };
+
+  /**
+   * Returns the source data object as an arrays of arrays format even when source data was provided in another format.
+   * Optionally you can provide a cell range by using the `row`, `col`, `row2`, `col2` arguments, to get only a fragment of grid data.
+   *
+   * @memberof Core#
+   * @function getSourceDataArray
+   * @since 0.28.0
+   * @param {Number} [r] From row.
+   * @param {Number} [c] From column.
+   * @param {Number} [r2] To row.
+   * @param {Number} [c2] To column.
+   * @returns {Array} An array of arrays.
+   */
+  this.getSourceDataArray = function(r, c, r2, c2) {
+    let data;
+
+    if (r === void 0) {
+      data = dataSource.getData(true);
+    } else {
+      data = dataSource.getByRange(new WalkontableCellCoords(r, c), new WalkontableCellCoords(r2, c2), true);
     }
 
     return data;
@@ -2092,6 +2223,18 @@ Handsontable.Core = function Core(rootElement, userSettings) {
   };
 
   /**
+   * Remove one or more rows from the cell meta object.
+   *
+   * @since 0.30.0
+   * @param {Number} index An integer that specifies at what position to add/remove items, Use negative values to specify the position from the end of the array.
+   * @param {Number} deleteAmount The number of items to be removed. If set to 0, no items will be removed.
+   * @param {Array} items The new items to be added to the array.
+   */
+  this.spliceCellsMeta = function(index, deleteAmount, ...items) {
+    priv.cellSettings.splice(index, deleteAmount, ...items);
+  };
+
+  /**
    * Set cell meta data object defined by `prop` to the corresponding params `row` and `col`.
    *
    * @memberof Core#
@@ -2125,6 +2268,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @fires Hooks#afterSetCellMeta
    */
   this.setCellMeta = function(row, col, key, val) {
+    [row, col] = recordTranslator.toPhysical(row, col);
+
     if (!priv.cellSettings[row]) {
       priv.cellSettings[row] = [];
     }
@@ -2162,8 +2307,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
 
     let visualRow = row;
     let visualCol = col;
-    row = translateRowIndex(row);
-    col = translateColIndex(col);
+
+    [row, col] = recordTranslator.toPhysical(row, col);
 
     if (!priv.columnSettings[col]) {
       priv.columnSettings[col] = columnFactory(GridSettings, priv.columnsSettingConflicts);
@@ -2203,43 +2348,25 @@ Handsontable.Core = function Core(rootElement, userSettings) {
   };
 
   /**
+   * Returns a row off the cell meta array.
+   *
+   * @memberof Core#
+   * @function getCellMetaAtRow
+   * @since 0.30.0
+   * @param {Number} row Index of the row to return cell meta for.
+   * @returns {Array}
+   */
+  this.getCellMetaAtRow = function(row) {
+    return priv.cellSettings[row];
+  };
+
+  /**
    * Checks if the data format and config allows user to modify the column structure.
    * @returns {boolean}
    */
   this.isColumnModificationAllowed = function() {
     return !(instance.dataType === 'object' || instance.getSettings().columns);
   };
-
-  /**
-   * If displayed rows order is different than the order of rows stored in memory (i.e. sorting is applied)
-   * we need to translate logical (stored) row index to physical (displayed) index.
-   *
-   * @private
-   * @memberof Core#
-   * @function translateRowIndex
-   * @param {Number} row Original row index
-   * @returns {Number} Translated row index
-   * @fires Hooks#modifyRow
-   */
-  function translateRowIndex(row) {
-    return Handsontable.hooks.run(instance, 'modifyRow', row);
-  }
-
-  /**
-   * If displayed columns order is different than the order of columns stored in memory (i.e. column were moved using manualColumnMove plugin)
-   * we need to translate logical (stored) column index to physical (displayed) index.
-   *
-   * @private
-   * @memberof Core#
-   * @function translateColIndex
-   * @param {Number} col Original column index
-   * @returns {Number} Translated column index
-   * @fires Hooks#modifyCol
-   */
-  function translateColIndex(col) {
-    // warning: this must be done after datamap.colToProp
-    return Handsontable.hooks.run(instance, 'modifyCol', col);
-  }
 
   var rendererLookup = cellMethodLookupFactory('renderer');
 
@@ -2574,7 +2701,8 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @returns {Number} Total number in rows in data source.
    */
   this.countSourceRows = function() {
-    return instance.getSourceData() ? instance.getSourceData().length : 0;
+    let sourceLength = Handsontable.hooks.run(instance, 'modifySourceLength');
+    return sourceLength || (instance.getSourceData() ? instance.getSourceData().length : 0);
   };
 
   /**
@@ -2900,11 +3028,13 @@ Handsontable.Core = function Core(rootElement, userSettings) {
    * @since 0.24.3
    * @memberof Core#
    * @function scrollViewportTo
-   * @param {Number|null} row Row index.
-   * @param {Number|null} column Column index.
+   * @param {Number} [row] Row index.
+   * @param {Number} [column] Column index.
+   * @param {Boolean} [snapToBottom = false] If `true`, viewport is scrolled to show the cell on the bottom of the table.
+   * @param {Boolean} [snapToRight = false] If `true`, viewport is scrolled to show the cell on the right side of the table.
    * @returns {Boolean} `true` if scroll was successful, `false` otherwise.
    */
-  this.scrollViewportTo = function(row, column) {
+  this.scrollViewportTo = function(row, column, snapToBottom = false, snapToRight = false) {
     if (row !== void 0 && (row < 0 || row >= instance.countRows())) {
       return false;
     }
@@ -2915,18 +3045,18 @@ Handsontable.Core = function Core(rootElement, userSettings) {
     let result = false;
 
     if (row !== void 0 && column !== void 0) {
-      instance.view.wt.scrollVertical(row);
-      instance.view.wt.scrollHorizontal(column);
+      instance.view.wt.wtOverlays.topOverlay.scrollTo(row, snapToBottom);
+      instance.view.wt.wtOverlays.leftOverlay.scrollTo(column, snapToRight);
 
       result = true;
     }
     if (typeof row === 'number' && typeof column !== 'number') {
-      instance.view.wt.scrollVertical(row);
+      instance.view.wt.wtOverlays.topOverlay.scrollTo(row, snapToBottom);
 
       result = true;
     }
     if (typeof column === 'number' && typeof row !== 'number') {
-      instance.view.wt.scrollHorizontal(column);
+      instance.view.wt.wtOverlays.leftOverlay.scrollTo(column, snapToRight);
 
       result = true;
     }
@@ -3458,7 +3588,7 @@ DefaultSettings.prototype = {
    * @example
    * ```js
    * ...
-   * comments: [{row: 1, col: 1, comment: "Test comment"}],
+   * comments: [{row: 1, col: 1, comment: {value: "Test comment"}}],
    * ...
    * ```
    */
@@ -3518,7 +3648,7 @@ DefaultSettings.prototype = {
   minCols: 0,
 
   /**
-   * Maximum number of rows.
+   * Maximum number of rows. If set to a value lower than the initial row count, the data will be trimmed to the provided value as the number of rows.
    *
    * @type {Number}
    * @default Infinity
@@ -3906,8 +4036,9 @@ DefaultSettings.prototype = {
 
   /**
    * If set to `true`, Handsontable will accept values that were marked as invalid by the cell `validator`.
-   * It will result with *invalid* cells being treated as *valid*.
-   * If set to `false`, Handsontable will *not* accept the invalid values.
+   * It will result with *invalid* cells being treated as *valid* (will save the *invalid* value into the Handsontable data source).
+   * If set to `false`, Handsontable will *not* accept the invalid values and won't allow the user to close the editor.
+   * This option will be particularly useful when used with the Autocomplete's `strict` mode.
    *
    * @type {Boolean}
    * @default true
@@ -4273,7 +4404,8 @@ DefaultSettings.prototype = {
    * // as a object with initial order (sort ascending column at index 2)
    * columnSorting: {
    *   column: 2,
-   *   sortOrder: true // true = ascending, false = descending, undefined = original order
+   *   sortOrder: true, // true = ascending, false = descending, undefined = original order
+   *   sortEmptyCells: true // true = the table sorts empty cells, false = the table moves all empty cells to the end of the table
    * }
    * ...
    * ```
@@ -4804,9 +4936,10 @@ DefaultSettings.prototype = {
   defaultDate: void 0,
 
   /**
-   * If typed `true` value entered into the cell must match to the autocomplete source. Otherwise, cell won't pass the validation.
+   * If set to `true`, the value entered into the cell must match (case-sensitive) the autocomplete source. Otherwise, cell won't pass the validation.
+   * When filtering the autocomplete source list, the editor will be working in case-insensitive mode.
    *
-   * Option desired for `'autocomplete'`-typed cells.
+   * Option desired for `autocomplete`-typed cells.
    *
    * @example
    * ```js
@@ -4822,6 +4955,28 @@ DefaultSettings.prototype = {
    * @type {Boolean}
    */
   strict: void 0,
+
+  /**
+   * @description
+   * If typed `true`, data defined in `source` of the autocomplete or dropdown cell will be treated as HTML.
+   *
+   * __Warning:__ Enabling this option can cause serious XSS vulnerabilities.
+   *
+   * Option desired for `'autocomplete'`-typed cells.
+   * @example
+   * ```js
+   * ...
+   * columns: [{
+   *   type: 'autocomplete',
+   *   allowHtml: true,
+   *   source: ['<b>foo</b>', '<b>bar</b>']
+   * }]
+   * ...
+   * ```
+   * @type {Boolean}
+   * @default false
+   */
+  allowHtml: false,
 
   /**
    * If typed `true` then virtual rendering mechanism for handsontable will be disabled.
@@ -4935,6 +5090,15 @@ DefaultSettings.prototype = {
    * @type {Boolean}
    */
   filters: void 0,
+
+  /**
+   * It allows Handsontable to process formula expressions defined in the provided data.
+   *
+   * @pro
+   * @since 1.7.0
+   * @type {Boolean}
+   */
+  formulas: void 0,
 
   /**
    * @description

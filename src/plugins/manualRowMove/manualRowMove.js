@@ -102,8 +102,6 @@ class ManualRowMove extends BasePlugin {
       return;
     }
 
-    this.rowsMapper.createMap(this.hot.countSourceRows());
-
     this.addHook('beforeOnCellMouseDown', (event, coords, TD, blockCalculations) => this.onBeforeOnCellMouseDown(event, coords, TD, blockCalculations));
     this.addHook('beforeOnCellMouseOver', (event, coords, TD, blockCalculations) => this.onBeforeOnCellMouseOver(event, coords, TD, blockCalculations));
     this.addHook('afterScrollHorizontally', () => this.onAfterScrollHorizontally());
@@ -111,12 +109,10 @@ class ManualRowMove extends BasePlugin {
     this.addHook('beforeRemoveRow', (index, amount) => this.onBeforeRemoveRow(index, amount));
     this.addHook('afterRemoveRow', (index, amount) => this.onAfterRemoveRow(index, amount));
     this.addHook('afterCreateRow', (index, amount) => this.onAfterCreateRow(index, amount));
+    this.addHook('afterLoadData', (firstTime) => this.onAfterLoadData(firstTime));
     this.addHook('beforeColumnSort', (column, order) => this.onBeforeColumnSort(column, order));
     this.addHook('unmodifyRow', (row) => this.onUnmodifyRow(row));
 
-    this.initialSettings();
-    this.backlight.build();
-    this.guideline.build();
     this.registerEvents();
 
     // TODO: move adding plugin classname to BasePlugin.
@@ -132,6 +128,8 @@ class ManualRowMove extends BasePlugin {
     this.disablePlugin();
     this.enablePlugin();
 
+    this.onAfterPluginsInitialized();
+
     super.updatePlugin();
   }
 
@@ -139,7 +137,11 @@ class ManualRowMove extends BasePlugin {
    * Disable plugin for this Handsontable instance.
    */
   disablePlugin() {
-    this.rowsMapper.clearMap();
+    let pluginSettings = this.hot.getSettings().manualRowMove;
+
+    if (Array.isArray(pluginSettings)) {
+      this.rowsMapper.clearMap();
+    }
 
     removeClass(this.hot.rootElement, CSS_PLUGIN);
 
@@ -167,24 +169,29 @@ class ManualRowMove extends BasePlugin {
    * @param {Number} target Visual row index being a target for the moved rows.
    */
   moveRows(rows, target) {
-    this.hot.runHooks('beforeRowMove', rows, target);
+    let priv = privatePool.get(this);
+    let beforeMoveHook = this.hot.runHooks('beforeRowMove', rows, target);
 
-    // first we need to rewrite an visual indexes to logical for save reference after move
-    arrayEach(rows, (row, index, array) => {
-      array[index] = this.rowsMapper.getValueByIndex(row);
-    });
+    priv.disallowMoving = beforeMoveHook === false;
 
-    // next, when we have got an logical indexes, we can
-    arrayEach(rows, (row, index) => {
-      let actualPosition = this.rowsMapper.getIndexByValue(row);
+    if (!priv.disallowMoving) {
+      // first we need to rewrite an visual indexes to logical for save reference after move
+      arrayEach(rows, (row, index, array) => {
+        array[index] = this.rowsMapper.getValueByIndex(row);
+      });
 
-      if (actualPosition !== target) {
-        this.rowsMapper.moveRow(actualPosition, target + index);
-      }
-    });
+      // next, when we have got an logical indexes, we can move rows
+      arrayEach(rows, (row, index) => {
+        let actualPosition = this.rowsMapper.getIndexByValue(row);
 
-    // after moving we have to clear rowsMapper from null entries
-    this.rowsMapper.clearNull();
+        if (actualPosition !== target) {
+          this.rowsMapper.moveRow(actualPosition, target + index);
+        }
+      });
+
+      // after moving we have to clear rowsMapper from null entries
+      this.rowsMapper.clearNull();
+    }
 
     this.hot.runHooks('afterRowMove', rows, target);
   }
@@ -201,7 +208,7 @@ class ManualRowMove extends BasePlugin {
     let selection = this.hot.selection;
     let lastColIndex = this.hot.countCols() - 1;
 
-    selection.setRangeStart(new WalkontableCellCoords(startRow, 0));
+    selection.setRangeStartOnly(new WalkontableCellCoords(startRow, 0));
     selection.setRangeEnd(new WalkontableCellCoords(endRow, lastColIndex), false);
   }
 
@@ -321,9 +328,21 @@ class ManualRowMove extends BasePlugin {
    * @private
    */
   refreshPositions() {
-    let wtTable = this.hot.view.wt.wtTable;
     let priv = privatePool.get(this);
     let coords = priv.target.coords;
+    let firstVisible = this.hot.view.wt.wtTable.getFirstVisibleRow();
+    let lastVisible = this.hot.view.wt.wtTable.getLastVisibleRow();
+    let fixedRows = this.hot.getSettings().fixedRowsTop;
+    let countRows = this.hot.countRows();
+
+    if (coords.row < fixedRows && firstVisible > 0) {
+      this.hot.scrollViewportTo(firstVisible - 1);
+    }
+    if (coords.row >= lastVisible && lastVisible < countRows) {
+      this.hot.scrollViewportTo(lastVisible + 1, undefined, true);
+    }
+
+    let wtTable = this.hot.view.wt.wtTable;
     let TD = priv.target.TD;
     let rootElementOffset = offset(this.hot.rootElement);
     let tdOffsetTop = this.hot.view.THEAD.offsetHeight + this.getRowsHeight(0, coords.row);
@@ -332,6 +351,10 @@ class ManualRowMove extends BasePlugin {
     let tbodyOffsetTop = wtTable.TBODY.offsetTop;
     let backlightElemMarginTop = this.backlight.getOffset().top;
     let backlightElemHeight = this.backlight.getSize().height;
+
+    if ((rootElementOffset.top + wtTable.holder.offsetHeight) < priv.target.eventPageY) {
+      priv.target.coords.row++;
+    }
 
     if (this.isFixedRowTop(coords.row)) {
       tdOffsetTop += wtTable.holder.scrollTop;
@@ -344,7 +367,7 @@ class ManualRowMove extends BasePlugin {
 
     if (coords.row < 0) {
       // if hover on colHeader
-      priv.target.row = 0;
+      priv.target.row = firstVisible > 0 ? firstVisible - 1 : firstVisible;
 
     } else if (TD.offsetHeight / 2 + tdOffsetTop <= mouseOffsetTop) {
       // if hover on lower part of TD
@@ -374,8 +397,48 @@ class ManualRowMove extends BasePlugin {
       guidelineTop = hiderHeight - 1;
     }
 
+    let topOverlayHeight = 0;
+    if (this.hot.view.wt.wtOverlays.topOverlay) {
+      topOverlayHeight = this.hot.view.wt.wtOverlays.topOverlay.clone.wtTable.TABLE.offsetHeight;
+    }
+
+    if (coords.row >= fixedRows && (guidelineTop - wtTable.holder.scrollTop) < topOverlayHeight) {
+      this.hot.scrollViewportTo(coords.row);
+    }
+
     this.backlight.setPosition(backlightTop);
     this.guideline.setPosition(guidelineTop);
+  }
+
+  /**
+   * This method checks arrayMap from rowsMapper and updates the rowsMapper if it's necessary.
+   *
+   * @private
+   */
+  updateRowsMapper() {
+    let countRows = this.hot.countSourceRows();
+    let rowsMapperLen = this.rowsMapper._arrayMap.length;
+
+    if (rowsMapperLen === 0) {
+      this.rowsMapper.createMap(countRows || this.hot.getSettings().startRows);
+
+    }  else if (rowsMapperLen < countRows) {
+      let diff = countRows - rowsMapperLen;
+
+      this.rowsMapper.insertItems(rowsMapperLen, diff);
+
+    } else if (rowsMapperLen > countRows) {
+      let maxIndex = countRows - 1;
+      let rowsToRemove = [];
+
+      arrayEach(this.rowsMapper._arrayMap, (value, index, array) => {
+        if (value > maxIndex) {
+          rowsToRemove.push(index);
+        }
+      });
+
+      this.rowsMapper.removeItems(rowsToRemove);
+    }
   }
 
   /**
@@ -534,6 +597,9 @@ class ManualRowMove extends BasePlugin {
    */
   onMouseUp() {
     let priv = privatePool.get(this);
+    let target = priv.target.row;
+    let rowsLen = priv.rowsToMove.length;
+
     priv.pressed = false;
     priv.backlightHeight = 0;
 
@@ -542,19 +608,22 @@ class ManualRowMove extends BasePlugin {
     if (this.hot.selection.selectedHeader.rows) {
       addClass(this.hot.rootElement, CSS_AFTER_SELECTION);
     }
-    if (priv.rowsToMove.length < 1) {
+
+    if (rowsLen < 1 || target === void 0 || priv.rowsToMove.indexOf(target) > -1 ||
+        (priv.rowsToMove[rowsLen - 1] === target - 1)) {
       return;
     }
 
-    let target = priv.target.row;
-
     this.moveRows(priv.rowsToMove, target);
+
     this.persistentStateSave();
     this.hot.render();
 
-    let selectionStart = this.rowsMapper.getIndexByValue(priv.rowsToMove[0]);
-    let selectionEnd = this.rowsMapper.getIndexByValue(priv.rowsToMove[priv.rowsToMove.length - 1]);
-    this.changeSelection(selectionStart, selectionEnd);
+    if (!priv.disallowMoving) {
+      let selectionStart = this.rowsMapper.getIndexByValue(priv.rowsToMove[0]);
+      let selectionEnd = this.rowsMapper.getIndexByValue(priv.rowsToMove[rowsLen - 1]);
+      this.changeSelection(selectionStart, selectionEnd);
+    }
 
     priv.rowsToMove.length = 0;
   }
@@ -615,6 +684,16 @@ class ManualRowMove extends BasePlugin {
   }
 
   /**
+   * `afterLoadData` hook callback.
+   *
+   * @private
+   * @param {Boolean} firstTime True if that was loading data during the initialization.
+   */
+  onAfterLoadData(firstTime) {
+    this.updateRowsMapper();
+  }
+
+  /**
    * 'modifyRow' hook callback.
    *
    * @private
@@ -623,7 +702,8 @@ class ManualRowMove extends BasePlugin {
    */
   onModifyRow(row, source) {
     if (source !== this.pluginName) {
-      row = this.rowsMapper.getValueByIndex(row);
+      let rowInMapper = this.rowsMapper.getValueByIndex(row);
+      row = rowInMapper === null ? row : rowInMapper;
     }
 
     return row;
@@ -637,7 +717,21 @@ class ManualRowMove extends BasePlugin {
    * @returns {Number} Logical row index.
    */
   onUnmodifyRow(row) {
-    return this.rowsMapper.getIndexByValue(row);
+    let indexInMapper = this.rowsMapper.getIndexByValue(row);
+
+    return indexInMapper === null ? row : indexInMapper;
+  }
+
+  /**
+   * `afterPluginsInitialized` hook callback.
+   *
+   * @private
+   */
+  onAfterPluginsInitialized() {
+    this.updateRowsMapper();
+    this.initialSettings();
+    this.backlight.build();
+    this.guideline.build();
   }
 
   /**
